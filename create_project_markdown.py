@@ -153,6 +153,7 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
                     f.write(f'```{supported_extensions[ext]}\n')
                     f.write(code_content)
                     f.write("\n```")
+                    f.write("\n")
     logging.info(f'Markdown file generated: {output_file}')
 
 
