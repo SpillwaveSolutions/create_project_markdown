@@ -6,9 +6,10 @@ import argparse
 from typing import List, Optional, Dict
 from pathlib import Path
 import fnmatch
+import yaml
 
-# Supported file extensions and their corresponding language identifiers
-SUPPORTED_EXTENSIONS: Dict[str, str] = {
+# Default supported file extensions and their corresponding language identifiers
+DEFAULT_SUPPORTED_EXTENSIONS: Dict[str, str] = {
     '.py': 'python',
     '.java': 'java',
     '.js': 'javascript',
@@ -23,10 +24,35 @@ SUPPORTED_EXTENSIONS: Dict[str, str] = {
     '.sh': 'bash',
     '.sql': 'sql',
     '.avsc': 'avro'
-
 }
 
 forbidden_dirs = ['__pycache__', 'dist']
+
+CONFIG_PATH = Path.cwd() / '.pmarkdownc' / 'config.yaml'
+GITIGNORE_PATH = Path.cwd() / '.gitignore'
+
+
+# Function to create default config file if it doesn't exist
+def create_default_config():
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, 'w') as config_file:
+        yaml.dump({'supported_extensions': DEFAULT_SUPPORTED_EXTENSIONS}, config_file)
+
+    # Add .pmarkdownc to .gitignore if it exists
+    if GITIGNORE_PATH.exists():
+        with open(GITIGNORE_PATH, 'a') as gitignore_file:
+            gitignore_file.write('\n# Added by pmarkdown\n.pmarkdownc/\n')
+
+
+# Function to load the supported extensions from the config file
+def load_supported_extensions() -> Dict[str, str]:
+    if not CONFIG_PATH.exists():
+        create_default_config()
+
+    with open(CONFIG_PATH, 'r') as config_file:
+        config = yaml.safe_load(config_file)
+    return config.get('supported_extensions', DEFAULT_SUPPORTED_EXTENSIONS)
+
 
 def parse_gitignore(project_path: str) -> List[str]:
     gitignore_path = os.path.join(project_path, '.gitignore')
@@ -36,6 +62,7 @@ def parse_gitignore(project_path: str) -> List[str]:
     with open(gitignore_path, 'r') as f:
         return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
+
 def should_ignore(path: str, gitignore_patterns: List[str]) -> bool:
     print(f"Should ignore {gitignore_patterns} PATH={path}")
     for pattern in gitignore_patterns:
@@ -43,9 +70,11 @@ def should_ignore(path: str, gitignore_patterns: List[str]) -> bool:
             return True
     return False
 
+
 def generate_markdown(project_path: str, include_pattern: Optional[str] = None, exclude_pattern: Optional[str] = None,
                       output_file: str = 'project_structure.md') -> None:
     gitignore_patterns = parse_gitignore(project_path)
+    supported_extensions = load_supported_extensions()
 
     with open(output_file, 'w') as f:
         f.write(f'# {os.path.basename(project_path)}\n\n')
@@ -57,15 +86,14 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
             dirs[:] = [d for d in dirs if not d.startswith('.') and
                        "node_modules" not in d and
                        "cdk.out" not in d and
-                        "env" not in d and
-                        "venv" not in d
+                       "env" not in d and
+                       "venv" not in d
                        and
                        d not in forbidden_dirs and
                        not should_ignore(os.path.join(rel_path, d), gitignore_patterns)]
 
-            level: int = rel_path.count(os.sep)
-            indent: str = '#' * (level + 2)
-            f.write(f'{indent} {os.path.basename(root)}/\n\n')
+            # Write directory path relative from the project root
+            f.write(f'## {os.path.join(rel_path)}\n\n')
 
             for file in files:
                 file_rel_path = os.path.join(rel_path, file)
@@ -73,7 +101,7 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
                     continue
 
                 _, ext = os.path.splitext(file)
-                if ext in SUPPORTED_EXTENSIONS:
+                if ext in supported_extensions:
                     if include_pattern and not re.search(include_pattern, file):
                         continue
                     if exclude_pattern and re.search(exclude_pattern, file):
@@ -81,10 +109,12 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
                     file_path: str = os.path.join(root, file)
                     with open(file_path, 'r') as code_file:
                         code_content: str = code_file.read()
-                    f.write(f'{indent}# {file}\n\n')
-                    f.write(f'```{SUPPORTED_EXTENSIONS[ext]}\n')
+                    # Write file name as fully qualified path relative from the project root
+                    f.write(f'### {file_rel_path}\n\n')
+                    f.write(f'```{supported_extensions[ext]}\n')
                     f.write(code_content)
-                    f.write('\n```\n\n')
+                    f.write('\n```\n')
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Generate a single markdown file for a project.')
@@ -97,6 +127,7 @@ def main() -> None:
 
     generate_markdown(args.project_path, args.include, args.exclude, args.outfile)
     print(f'Markdown file generated: {args.outfile}')
+
 
 if __name__ == '__main__':
     main()
