@@ -7,6 +7,7 @@ from typing import List, Optional, Dict
 from pathlib import Path
 import fnmatch
 import yaml
+import logging
 
 # Default supported file extensions and their corresponding language identifiers
 DEFAULT_SUPPORTED_EXTENSIONS: Dict[str, str] = {
@@ -26,17 +27,32 @@ DEFAULT_SUPPORTED_EXTENSIONS: Dict[str, str] = {
     '.avsc': 'avro'
 }
 
-forbidden_dirs = ['__pycache__', 'dist']
+# Default directories to be ignored
+DEFAULT_FORBIDDEN_DIRS: List[str] = [
+    '__pycache__', 'dist', 'node_modules', 'cdk.out', 'env', 'venv'
+]
 
 CONFIG_PATH = Path.cwd() / '.pmarkdownc' / 'config.yaml'
 GITIGNORE_PATH = Path.cwd() / '.gitignore'
+
+# Configure logging
+DEFAULT_LOG_LEVEL = 'INFO'
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 # Function to create default config file if it doesn't exist
 def create_default_config():
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, 'w') as config_file:
-        yaml.dump({'supported_extensions': DEFAULT_SUPPORTED_EXTENSIONS}, config_file)
+        yaml.dump({
+            'supported_extensions': DEFAULT_SUPPORTED_EXTENSIONS,
+            'forbidden_dirs': DEFAULT_FORBIDDEN_DIRS,
+            'project_path': '.',
+            'include_pattern': None,
+            'exclude_pattern': None,
+            'outfile': 'project_structure.md',
+            'log_level': DEFAULT_LOG_LEVEL
+        }, config_file)
 
     # Add .pmarkdownc to .gitignore if it exists
     if GITIGNORE_PATH.exists():
@@ -44,14 +60,22 @@ def create_default_config():
             gitignore_file.write('\n# Added by pmarkdown\n.pmarkdownc/\n')
 
 
-# Function to load the supported extensions from the config file
-def load_supported_extensions() -> Dict[str, str]:
+# Function to load the supported extensions and forbidden directories from the config file
+def load_config() -> Dict[str, Optional[str]]:
     if not CONFIG_PATH.exists():
         create_default_config()
 
     with open(CONFIG_PATH, 'r') as config_file:
         config = yaml.safe_load(config_file)
-    return config.get('supported_extensions', DEFAULT_SUPPORTED_EXTENSIONS)
+    return {
+        'supported_extensions': config.get('supported_extensions', DEFAULT_SUPPORTED_EXTENSIONS),
+        'forbidden_dirs': config.get('forbidden_dirs', DEFAULT_FORBIDDEN_DIRS),
+        'project_path': config.get('project_path', '.'),
+        'include_pattern': config.get('include_pattern', None),
+        'exclude_pattern': config.get('exclude_pattern', None),
+        'outfile': config.get('outfile', 'project_structure.md'),
+        'log_level': config.get('log_level', DEFAULT_LOG_LEVEL)
+    }
 
 
 def parse_gitignore(project_path: str) -> List[str]:
@@ -64,7 +88,7 @@ def parse_gitignore(project_path: str) -> List[str]:
 
 
 def should_ignore(path: str, gitignore_patterns: List[str]) -> bool:
-    print(f"Should ignore {gitignore_patterns} PATH={path}")
+    logging.debug(f"Checking if path should be ignored: {path} with patterns {gitignore_patterns}")
     for pattern in gitignore_patterns:
         if fnmatch.fnmatch(path, pattern):
             return True
@@ -74,7 +98,14 @@ def should_ignore(path: str, gitignore_patterns: List[str]) -> bool:
 def generate_markdown(project_path: str, include_pattern: Optional[str] = None, exclude_pattern: Optional[str] = None,
                       output_file: str = 'project_structure.md') -> None:
     gitignore_patterns = parse_gitignore(project_path)
-    supported_extensions = load_supported_extensions()
+    config = load_config()
+    supported_extensions = config['supported_extensions']
+    forbidden_dirs = config['forbidden_dirs']
+
+    project_path = project_path or config['project_path']
+    include_pattern = include_pattern or config['include_pattern']
+    exclude_pattern = exclude_pattern or config['exclude_pattern']
+    output_file = output_file or config['outfile']
 
     with open(output_file, 'w') as f:
         f.write(f'# {os.path.basename(project_path)}\n\n')
@@ -84,16 +115,24 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
                 rel_path = ''
 
             dirs[:] = [d for d in dirs if not d.startswith('.') and
-                       "node_modules" not in d and
-                       "cdk.out" not in d and
-                       "env" not in d and
-                       "venv" not in d
-                       and
                        d not in forbidden_dirs and
                        not should_ignore(os.path.join(rel_path, d), gitignore_patterns)]
 
+            # Check if directory should be skipped if it has no README.md or files to include
+            if 'README.md' not in files and not any(
+                    os.path.splitext(file)[1] in supported_extensions for file in files):
+                continue
+
             # Write directory path relative from the project root
             f.write(f'## {os.path.join(rel_path)}\n\n')
+
+            # If README.md exists, write its contents first
+            if 'README.md' in files:
+                readme_path = os.path.join(root, 'README.md')
+                with open(readme_path, 'r') as readme_file:
+                    readme_content = readme_file.read()
+                f.write(readme_content + '\n\n')
+                files.remove('README.md')
 
             for file in files:
                 file_rel_path = os.path.join(rel_path, file)
@@ -113,20 +152,29 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
                     f.write(f'### {file_rel_path}\n\n')
                     f.write(f'```{supported_extensions[ext]}\n')
                     f.write(code_content)
-                    f.write('\n```\n')
+                    f.write("\n```")
+    logging.info(f'Markdown file generated: {output_file}')
 
 
 def main() -> None:
+    config = load_config()
+    logging_level = config['log_level'].upper()
+    logging.getLogger().setLevel(logging_level)
+
     parser = argparse.ArgumentParser(description='Generate a single markdown file for a project.')
-    parser.add_argument('project_path', nargs='?', default='.',
-                        help='Path to the project directory (default: current directory)')
-    parser.add_argument('-i', '--include', help='Regular expression pattern to include specific files or directories')
-    parser.add_argument('-e', '--exclude', help='Regular expression pattern to exclude specific files or directories')
-    parser.add_argument('-o', '--outfile', default='project_structure.md', help='Output markdown file name')
+    parser.add_argument('project_path', nargs='?', default=config['project_path'],
+                        help='Path to the project directory (default: current directory from config)')
+    parser.add_argument('-i', '--include', default=config['include_pattern'],
+                        help='Regular expression pattern to include specific files or directories')
+    parser.add_argument('-e', '--exclude', default=config['exclude_pattern'],
+                        help='Regular expression pattern to exclude specific files or directories')
+    parser.add_argument('-o', '--outfile', default=config['outfile'], help='Output markdown file name')
+    parser.add_argument('-l', '--log', default=config['log_level'], help='Set the logging level (default from config)')
     args = parser.parse_args()
 
+    logging.getLogger().setLevel(args.log.upper())
+
     generate_markdown(args.project_path, args.include, args.exclude, args.outfile)
-    print(f'Markdown file generated: {args.outfile}')
 
 
 if __name__ == '__main__':
