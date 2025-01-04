@@ -3,179 +3,274 @@
 import os
 import re
 import argparse
-from typing import List, Optional, Dict
-from pathlib import Path
-import fnmatch
-import yaml
+import math
 import logging
+from typing import List, Optional, Dict, Tuple
+from pathspec import PathSpec
+from pathspec.patterns import GitWildMatchPattern
 
-# Default supported file extensions and their corresponding language identifiers
-DEFAULT_SUPPORTED_EXTENSIONS: Dict[str, str] = {
+# Constants
+MAX_FILE_SIZE = 200 * 1024  # 200KB in bytes
+SUPPORTED_EXTENSIONS: Dict[str, str] = {
     '.py': 'python',
-    '.java': 'java',
-    '.js': 'javascript',
-    '.kt': 'kotlin',
-    '.kts': 'kotlin',
-    '.ts': 'typescript',
-    '.go': 'go',
-    '.cs': 'csharp',
-    '.xml': 'xml',
+    '.kt': 'java',
     '.yaml': 'yaml',
-    '.toml': 'toml',
     '.sh': 'bash',
     '.sql': 'sql',
-    '.avsc': 'avro'
+    '.md': 'markdown'
 }
 
-# Default directories to be ignored
-DEFAULT_FORBIDDEN_DIRS: List[str] = [
-    '__pycache__', 'dist', 'node_modules', 'cdk.out', 'env', 'venv'
-]
-
-CONFIG_PATH = Path.cwd() / '.pmarkdownc' / 'config.yaml'
-GITIGNORE_PATH = Path.cwd() / '.gitignore'
-
 # Configure logging
-DEFAULT_LOG_LEVEL = 'INFO'
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-# Function to create default config file if it doesn't exist
-def create_default_config():
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, 'w') as config_file:
-        yaml.dump({
-            'supported_extensions': DEFAULT_SUPPORTED_EXTENSIONS,
-            'forbidden_dirs': DEFAULT_FORBIDDEN_DIRS,
-            'project_path': '.',
-            'include_pattern': None,
-            'exclude_pattern': None,
-            'outfile': 'project_structure.md',
-            'log_level': DEFAULT_LOG_LEVEL
-        }, config_file)
+class MarkdownWriter:
+    def __init__(self, base_filename: str, max_size: int = MAX_FILE_SIZE):
+        self.base_filename = base_filename
+        self.max_size = max_size
+        self.current_chunk = 0  # Start at 0 since _start_new_chunk increments
+        self.current_size = 0
+        self.chunks: List[str] = []
+        self.current_file = None
+        self._start_new_chunk()
+        logging.info(f"Initialized MarkdownWriter with max size: {self.max_size / 1024:.2f}KB")
 
-    # Add .pmarkdownc to .gitignore if it exists
-    if GITIGNORE_PATH.exists():
-        with open(GITIGNORE_PATH, 'a') as gitignore_file:
-            gitignore_file.write('\n# Added by pmarkdown\n.pmarkdownc/\n')
+    def _get_chunk_filename(self, chunk_num: int) -> str:
+        if chunk_num == 1:
+            return self.base_filename
+        base, ext = os.path.splitext(self.base_filename)
+        return f"{base}_part{chunk_num}{ext}"
+
+    def _start_new_chunk(self) -> None:
+        # Close current file if open
+        if self.current_file is not None:
+            self.current_file.close()
+            current_size = os.path.getsize(self._get_chunk_filename(self.current_chunk))
+            logging.info(f"Closed chunk {self.current_chunk}, final size: {current_size / 1024:.2f}KB")
+            self.chunks.append(self._get_chunk_filename(self.current_chunk))
+
+        self.current_chunk += 1
+        filename = self._get_chunk_filename(self.current_chunk)
+        logging.info(f"Starting new chunk {self.current_chunk}: {filename}")
+        self.current_file = open(filename, 'w', encoding='utf-8')
+        self.current_size = 0
+
+        # Write header for new chunk
+        if self.current_chunk > 1:  # Not the first chunk
+            header = f"# Project Structure (Part {self.current_chunk})\n\n"
+            self.current_file.write(header)
+            self.current_size = len(header.encode('utf-8'))
+
+    def _check_and_rotate(self, content_size: int) -> None:
+        if self.current_size + content_size > self.max_size:
+            logging.info(
+                f"Size limit would be exceeded: current={self.current_size / 1024:.2f}KB + new={content_size / 1024:.2f}KB > max={self.max_size / 1024:.2f}KB")
+            self._start_new_chunk()
+
+    def write(self, content: str) -> None:
+        content_bytes = content.encode('utf-8')
+        content_size = len(content_bytes)
+        logging.debug(f"Writing content of size: {content_size / 1024:.2f}KB")
+
+        # If single content is larger than max_size, split it
+        if content_size > self.max_size:
+            logging.info(f"Content too large ({content_size / 1024:.2f}KB), splitting")
+            lines = content.splitlines(True)  # Keep line endings
+            current_lines = []
+            current_size = 0
+
+            for line in lines:
+                line_bytes = line.encode('utf-8')
+                line_size = len(line_bytes)
+
+                if current_size + line_size > self.max_size * 0.9:  # Use 90% threshold
+                    # Write accumulated lines
+                    chunk_content = ''.join(current_lines)
+                    chunk_bytes = chunk_content.encode('utf-8')
+                    self._check_and_rotate(len(chunk_bytes))
+                    self.current_file.write(chunk_content)
+                    self.current_file.flush()
+                    self.current_size += len(chunk_bytes)
+                    logging.info(
+                        f"Wrote chunk of {len(chunk_bytes) / 1024:.2f}KB, total: {self.current_size / 1024:.2f}KB")
+
+                    current_lines = []
+                    current_size = 0
+
+                current_lines.append(line)
+                current_size += line_size
+
+            # Write remaining lines
+            if current_lines:
+                chunk_content = ''.join(current_lines)
+                chunk_bytes = chunk_content.encode('utf-8')
+                self._check_and_rotate(len(chunk_bytes))
+                self.current_file.write(chunk_content)
+                self.current_file.flush()
+                self.current_size += len(chunk_bytes)
+                logging.info(
+                    f"Wrote final chunk of {len(chunk_bytes) / 1024:.2f}KB, total: {self.current_size / 1024:.2f}KB")
+        else:
+            # Regular write with size check
+            self._check_and_rotate(content_size)
+            self.current_file.write(content)
+            self.current_file.flush()
+            self.current_size += content_size
+            logging.debug(f"Current chunk size: {self.current_size / 1024:.2f}KB")
+
+    def close(self) -> None:
+        if self.current_file is not None:
+            self.current_file.close()
+            current_size = os.path.getsize(self._get_chunk_filename(self.current_chunk))
+            logging.info(f"Closed final chunk {self.current_chunk}, size: {current_size / 1024:.2f}KB")
+            self.chunks.append(self._get_chunk_filename(self.current_chunk))
+
+        # If we created multiple chunks, create an index
+        if len(self.chunks) > 1:
+            index_content = ["# Project Structure Index\n\n"]
+            total_size = 0
+
+            for i, chunk in enumerate(self.chunks, 1):
+                chunk_name = os.path.basename(chunk)
+                chunk_size = os.path.getsize(chunk)
+                total_size += chunk_size
+                size_kb = chunk_size / 1024
+
+                if i == 1:
+                    index_content.append(f"Main file: [{chunk_name}]({chunk_name}) ({size_kb:.2f}KB)\n")
+                else:
+                    index_content.append(f"Part {i}: [{chunk_name}]({chunk_name}) ({size_kb:.2f}KB)\n")
+
+            index_content.append(f"\nTotal size: {total_size / 1024:.2f}KB")
+
+            # Write the index file
+            with open(self.base_filename, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(index_content))
+            logging.info(f"Created index file with {len(self.chunks)} chunks, total size: {total_size / 1024:.2f}KB")
 
 
-# Function to load the supported extensions and forbidden directories from the config file
-def load_config() -> Dict[str, Optional[str]]:
-    if not CONFIG_PATH.exists():
-        create_default_config()
-
-    with open(CONFIG_PATH, 'r') as config_file:
-        config = yaml.safe_load(config_file)
-    return {
-        'supported_extensions': config.get('supported_extensions', DEFAULT_SUPPORTED_EXTENSIONS),
-        'forbidden_dirs': config.get('forbidden_dirs', DEFAULT_FORBIDDEN_DIRS),
-        'project_path': config.get('project_path', '.'),
-        'include_pattern': config.get('include_pattern', None),
-        'exclude_pattern': config.get('exclude_pattern', None),
-        'outfile': config.get('outfile', 'project_structure.md'),
-        'log_level': config.get('log_level', DEFAULT_LOG_LEVEL)
-    }
-
-
-def parse_gitignore(project_path: str) -> List[str]:
+def load_gitignore(project_path: str) -> PathSpec:
     gitignore_path = os.path.join(project_path, '.gitignore')
-    if not os.path.exists(gitignore_path):
-        return []
+    patterns = []
+    if os.path.exists(gitignore_path):
+        with open(gitignore_path, 'r') as f:
+            patterns = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    return PathSpec.from_lines(GitWildMatchPattern, patterns)
 
-    with open(gitignore_path, 'r') as f:
-        return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
+def is_ignored(path: str, root_path: str, gitignore_spec: PathSpec) -> bool:
+    """
+    Check if a path should be ignored according to gitignore rules.
+    Handles both files and directories correctly.
+    """
+    # Get the path relative to the project root
+    rel_path = os.path.relpath(path, root_path)
+    if rel_path == '.':
+        return False
 
-def should_ignore(path: str, gitignore_patterns: List[str]) -> bool:
-    logging.debug(f"Checking if path should be ignored: {path} with patterns {gitignore_patterns}")
-    for pattern in gitignore_patterns:
-        if fnmatch.fnmatch(path, pattern):
-            return True
-    return False
+    # Ensure forward slashes for consistency (especially important on Windows)
+    rel_path = rel_path.replace(os.sep, '/')
+
+    # For directories, append a slash to ensure directory patterns match correctly
+    if os.path.isdir(path):
+        rel_path += '/'
+
+    return gitignore_spec.match_file(rel_path)
 
 
 def generate_markdown(project_path: str, include_pattern: Optional[str] = None, exclude_pattern: Optional[str] = None,
                       output_file: str = 'project_structure.md') -> None:
-    gitignore_patterns = parse_gitignore(project_path)
-    config = load_config()
-    supported_extensions = config['supported_extensions']
-    forbidden_dirs = config['forbidden_dirs']
+    project_path = os.path.abspath(project_path)
+    gitignore_spec = load_gitignore(project_path)
 
-    project_path = project_path or config['project_path']
-    include_pattern = include_pattern or config['include_pattern']
-    exclude_pattern = exclude_pattern or config['exclude_pattern']
-    output_file = output_file or config['outfile']
+    writer = MarkdownWriter(output_file)
 
-    with open(output_file, 'w') as f:
-        f.write(f'# {os.path.basename(project_path)}\n\n')
+    try:
+        writer.write(f'# {os.path.basename(project_path)}\n\n')
+
         for root, dirs, files in os.walk(project_path):
-            rel_path = os.path.relpath(root, project_path)
-            if rel_path == '.':
-                rel_path = ''
+            # Filter out directories that should be ignored
+            dirs[:] = [d for d in dirs
+                       if not d.startswith('.')
+                       and not d.startswith("node_mod")
+                       and not is_ignored(os.path.join(root, d), project_path, gitignore_spec)]
 
-            dirs[:] = [d for d in dirs if not d.startswith('.') and
-                       d not in forbidden_dirs and
-                       not should_ignore(os.path.join(rel_path, d), gitignore_patterns)]
-
-            # Check if directory should be skipped if it has no README.md or files to include
-            if 'README.md' not in files and not any(
-                    os.path.splitext(file)[1] in supported_extensions for file in files):
+            # Skip this directory if it should be ignored
+            if is_ignored(root, project_path, gitignore_spec):
                 continue
 
-            # Write directory path relative from the project root
-            f.write(f'## {os.path.join(rel_path)}\n\n')
+            level: int = root.replace(project_path, '').count(os.sep)
+            indent: str = '#' * (level + 2)
 
-            # If README.md exists, write its contents first
-            if 'README.md' in files:
-                readme_path = os.path.join(root, 'README.md')
-                with open(readme_path, 'r') as readme_file:
-                    readme_content = readme_file.read()
-                f.write(readme_content + '\n\n')
-                files.remove('README.md')
+            # Write directory header
+            rel_path = os.path.relpath(root, project_path)
+            writer.write(f'{indent} {rel_path}/\n\n')
 
-            for file in files:
-                file_rel_path = os.path.join(rel_path, file)
-                if should_ignore(file_rel_path, gitignore_patterns):
+            # Process files in smaller batches
+            current_batch = []
+            current_batch_size = 0
+            max_batch_size = MAX_FILE_SIZE // 2  # Use half max size for batches
+
+            for file in sorted(files):  # Sort files for consistent ordering
+                file_path = os.path.join(root, file)
+                if is_ignored(file_path, project_path, gitignore_spec):
                     continue
 
                 _, ext = os.path.splitext(file)
-                if ext in supported_extensions:
+                if ext in SUPPORTED_EXTENSIONS:
                     if include_pattern and not re.search(include_pattern, file):
                         continue
                     if exclude_pattern and re.search(exclude_pattern, file):
                         continue
-                    file_path: str = os.path.join(root, file)
-                    with open(file_path, 'r') as code_file:
-                        code_content: str = code_file.read()
-                    # Write file name as fully qualified path relative from the project root
-                    f.write(f'### {file_rel_path}\n\n')
-                    f.write(f'```{supported_extensions[ext]}\n')
-                    f.write(code_content)
-                    f.write("\n```")
-                    f.write("\n")
-    logging.info(f'Markdown file generated: {output_file}')
+
+                    try:
+                        with open(file_path, 'r') as code_file:
+                            code_content: str = code_file.read()
+
+                        # Create the markdown content for this file
+                        file_content = f'{indent}# {file}\n\n```{SUPPORTED_EXTENSIONS[ext]}\n{code_content}\n```\n\n'
+                        file_size = len(file_content.encode('utf-8'))
+
+                        # If single file is larger than batch size, write it directly
+                        if file_size > max_batch_size:
+                            logging.info(f"Large file {file_path}: {file_size / 1024:.2f}KB")
+                            writer.write(file_content)
+                            continue
+
+                        # If adding this file would exceed batch size, write current batch
+                        if current_batch_size + file_size > max_batch_size and current_batch:
+                            writer.write(''.join(current_batch))
+                            current_batch = []
+                            current_batch_size = 0
+
+                        # Add to current batch
+                        current_batch.append(file_content)
+                        current_batch_size += file_size
+
+                    except UnicodeDecodeError:
+                        logging.warning(f"Skipping binary file {file_path}")
+                    except Exception as e:
+                        logging.error(f"Error processing file {file_path}: {str(e)}")
+
+            # Write any remaining files in the last batch
+            if current_batch:
+                writer.write(''.join(current_batch))
+
+    finally:
+        writer.close()
 
 
 def main() -> None:
-    config = load_config()
-    logging_level = config['log_level'].upper()
-    logging.getLogger().setLevel(logging_level)
-
     parser = argparse.ArgumentParser(description='Generate a single markdown file for a project.')
-    parser.add_argument('project_path', nargs='?', default=config['project_path'],
-                        help='Path to the project directory (default: current directory from config)')
-    parser.add_argument('-i', '--include', default=config['include_pattern'],
-                        help='Regular expression pattern to include specific files or directories')
-    parser.add_argument('-e', '--exclude', default=config['exclude_pattern'],
-                        help='Regular expression pattern to exclude specific files or directories')
-    parser.add_argument('-o', '--outfile', default=config['outfile'], help='Output markdown file name')
-    parser.add_argument('-l', '--log', default=config['log_level'], help='Set the logging level (default from config)')
+    parser.add_argument('project_path', nargs='?', default='.',
+                        help='Path to the project directory (default: current directory)')
+    parser.add_argument('-i', '--include', help='Regular expression pattern to include specific files or directories')
+    parser.add_argument('-e', '--exclude', help='Regular expression pattern to exclude specific files or directories')
+    parser.add_argument('-o', '--outfile', default='project_structure.md', help='Output markdown file name')
     args = parser.parse_args()
 
-    logging.getLogger().setLevel(args.log.upper())
-
     generate_markdown(args.project_path, args.include, args.exclude, args.outfile)
+    print(f'Markdown file generated: {args.outfile}')
 
 
 if __name__ == '__main__':
