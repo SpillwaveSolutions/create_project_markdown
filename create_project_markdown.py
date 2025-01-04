@@ -183,6 +183,17 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
     project_path = os.path.abspath(project_path)
     gitignore_spec = load_gitignore(project_path)
 
+    # Clean up any existing output files
+    base_name, ext = os.path.splitext(output_file)
+    existing_files = [f for f in os.listdir('.') if
+                      f == output_file or (f.startswith(f"{base_name}_part") and f.endswith(ext))]
+    for file in existing_files:
+        try:
+            os.remove(file)
+            logging.info(f"Removed existing file: {file}")
+        except OSError as e:
+            logging.warning(f"Error removing file {file}: {e}")
+
     writer = MarkdownWriter(output_file)
 
     try:
