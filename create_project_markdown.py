@@ -13,10 +13,20 @@ from pathspec.patterns import GitWildMatchPattern
 MAX_FILE_SIZE = 200 * 1024  # 200KB in bytes
 SUPPORTED_EXTENSIONS: Dict[str, str] = {
     '.py': 'python',
+    '.java': 'java',
+    '.js': 'javascript',
+    '.kt': 'kotlin',
+    '.kts': 'kotlin',
+    '.ts': 'typescript',
+    '.go': 'go',
+    '.cs': 'csharp',
+    '.xml': 'xml',
     '.kt': 'java',
     '.yaml': 'yaml',
+    '.toml': 'toml',
     '.sh': 'bash',
     '.sql': 'sql',
+    '.avsc': 'avro',
     '.md': 'markdown'
 }
 
@@ -197,7 +207,9 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
     writer = MarkdownWriter(output_file)
 
     try:
-        writer.write(f'# {os.path.basename(project_path)}\n\n')
+        project_name = os.path.basename(project_path)
+        if project_name != os.path.splitext(os.path.basename(__file__))[0]:
+            writer.write(f'# {project_name}\n\n')
 
         for root, dirs, files in os.walk(project_path):
             # Filter out directories that should be ignored
@@ -224,7 +236,8 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
 
             for file in sorted(files):  # Sort files for consistent ordering
                 file_path = os.path.join(root, file)
-                if is_ignored(file_path, project_path, gitignore_spec):
+                # Skip the script itself and any gitignored files before processing
+                if os.path.samefile(file_path, os.path.abspath(__file__)) or is_ignored(file_path, project_path, gitignore_spec):
                     continue
 
                 _, ext = os.path.splitext(file)
