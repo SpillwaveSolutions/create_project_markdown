@@ -3,29 +3,62 @@
 import os
 import re
 import argparse
-import math
 import logging
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict
 from pathspec import PathSpec
 from pathspec.patterns import GitWildMatchPattern
+import yaml
 
 # Constants
 MAX_FILE_SIZE = 200 * 1024  # 200KB in bytes
-SUPPORTED_EXTENSIONS: Dict[str, str] = {
-    '.py': 'python',
-    '.kt': 'java',
-    '.yaml': 'yaml',
-    '.sh': 'bash',
-    '.sql': 'sql',
-    '.md': 'markdown'
-}
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def load_config():
+    config_path = os.path.join('.pmarkdownc', 'config.yml')
+    default_config = {
+        'max_file_size': MAX_FILE_SIZE,
+        'exclude_pattern': None,
+        'forbidden_dirs': ['__pycache__', 'dist', 'node_modules', 'cdk.out', 'env', 'venv', '.venv', '.idea',  'build'],
+        'include_pattern': None,
+        'log_level': 'INFO',
+        'outfile': 'project_structure.md',
+        'project_path': '.',
+        'supported_extensions': {
+            '.avsc': 'avro',
+            '.cs': 'csharp',
+            '.go': 'go',
+            '.java': 'java',
+            '.js': 'javascript',
+            '.kt': 'kotlin',
+            '.kts': 'kotlin',
+            '.py': 'python',
+            '.sh': 'bash',
+            '.sql': 'sql',
+            '.toml': 'toml',
+            '.ts': 'typescript',
+            '.xml': 'xml',
+            '.yaml': 'yaml'
+        }
+    }
+
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as config_file:
+            config = yaml.safe_load(config_file)
+        return config  # Merge with defaults
+    else:
+        # Create the config file with default values
+        os.makedirs('.pmarkdownc', exist_ok=True)
+        with open(config_path, 'w') as config_file:
+            yaml.dump(default_config, config_file)
+        return default_config
+
+
+
+
 
 
 class MarkdownWriter:
-    def __init__(self, base_filename: str, max_size: int = MAX_FILE_SIZE):
+    def __init__(self, base_filename: str, max_size: int ):
         self.base_filename = base_filename
         self.max_size = max_size
         self.current_chunk = 0  # Start at 0 since _start_new_chunk increments
@@ -178,8 +211,13 @@ def is_ignored(path: str, root_path: str, gitignore_spec: PathSpec) -> bool:
     return gitignore_spec.match_file(rel_path)
 
 
-def generate_markdown(project_path: str, include_pattern: Optional[str] = None, exclude_pattern: Optional[str] = None,
-                      output_file: str = 'project_structure.md') -> None:
+def generate_markdown(project_path: str,
+                      include_pattern: Optional[str] = None,
+                      exclude_pattern: Optional[str] = None,
+                      output_file: str = 'project_structure.md',
+                      supported_extensions: Dict[str, str] = { },
+                      max_size: int = MAX_FILE_SIZE,
+                      forbidden_dirs : List[str] = []) -> None:
     project_path = os.path.abspath(project_path)
     gitignore_spec = load_gitignore(project_path)
 
@@ -194,7 +232,7 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
         except OSError as e:
             logging.warning(f"Error removing file {file}: {e}")
 
-    writer = MarkdownWriter(output_file)
+    writer = MarkdownWriter(output_file, max_size)
 
     try:
         writer.write(f'# {os.path.basename(project_path)}\n\n')
@@ -203,7 +241,7 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
             # Filter out directories that should be ignored
             dirs[:] = [d for d in dirs
                        if not d.startswith('.')
-                       and not d.startswith("node_mod")
+                       and not d not in forbidden_dirs
                        and not is_ignored(os.path.join(root, d), project_path, gitignore_spec)]
 
             # Skip this directory if it should be ignored
@@ -220,7 +258,7 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
             # Process files in smaller batches
             current_batch = []
             current_batch_size = 0
-            max_batch_size = MAX_FILE_SIZE // 2  # Use half max size for batches
+            max_batch_size = max_size // 2  # Use half max size for batches
 
             for file in sorted(files):  # Sort files for consistent ordering
                 file_path = os.path.join(root, file)
@@ -228,7 +266,7 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
                     continue
 
                 _, ext = os.path.splitext(file)
-                if ext in SUPPORTED_EXTENSIONS:
+                if ext in supported_extensions:
                     if include_pattern and not re.search(include_pattern, file):
                         continue
                     if exclude_pattern and re.search(exclude_pattern, file):
@@ -239,7 +277,7 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
                             code_content: str = code_file.read()
 
                         # Create the markdown content for this file
-                        file_content = f'{indent}# {file}\n\n```{SUPPORTED_EXTENSIONS[ext]}\n{code_content}\n```\n\n'
+                        file_content = f'{indent}# {file}\n\n```{supported_extensions[ext]}\n{code_content}\n```\n\n'
                         file_size = len(file_content.encode('utf-8'))
 
                         # If single file is larger than batch size, write it directly
@@ -271,17 +309,34 @@ def generate_markdown(project_path: str, include_pattern: Optional[str] = None, 
         writer.close()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description='Generate a single markdown file for a project.')
-    parser.add_argument('project_path', nargs='?', default='.',
-                        help='Path to the project directory (default: current directory)')
-    parser.add_argument('-i', '--include', help='Regular expression pattern to include specific files or directories')
-    parser.add_argument('-e', '--exclude', help='Regular expression pattern to exclude specific files or directories')
-    parser.add_argument('-o', '--outfile', default='project_structure.md', help='Output markdown file name')
+def main():
+    config = load_config()
+
+    parser = argparse.ArgumentParser(description='Generate markdown documentation for a project.')
+    parser.add_argument('project_path', nargs='?', default=config['project_path'], help='Path to the project directory')
+    parser.add_argument('--include', '-i', default=config['include_pattern'], help='Regular expression pattern to include specific files or directories')
+    parser.add_argument('--exclude', '-e', default=config['exclude_pattern'], help='Regular expression pattern to exclude specific files or directories')
+    parser.add_argument('--outfile', '-o', default=config['outfile'], help='Output markdown file name')
+
     args = parser.parse_args()
 
-    generate_markdown(args.project_path, args.include, args.exclude, args.outfile)
-    print(f'Markdown file generated: {args.outfile}')
+    # Override config with command-line arguments
+    config['project_path'] = args.project_path
+    config['include_pattern'] = args.include
+    config['exclude_pattern'] = args.exclude
+    config['outfile'] = args.outfile
+
+    # Configure logging using the level from the config file
+    log_level = getattr(logging, config['log_level'].upper(), logging.INFO)
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    generate_markdown(config['project_path'],
+                      config['include_pattern'],
+                      config['exclude_pattern'],
+                      config['outfile'],
+                      config['supported_extensions'],
+                      config.get('max_file_size', MAX_FILE_SIZE),
+                      config.get('forbidden_dirs', []))
 
 
 if __name__ == '__main__':
