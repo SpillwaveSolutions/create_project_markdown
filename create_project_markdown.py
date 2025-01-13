@@ -42,10 +42,13 @@ def load_config():
     }
 
     if os.path.exists(config_path):
+        logging.info(f"Loading config from {config_path}")
         with open(config_path, 'r') as config_file:
             config = yaml.safe_load(config_file)
+            logging.debug(f"Loaded config: {config}")
         return config  # Merge with defaults
     else:
+        logging.info(f"No config file found at {config_path}, creating with defaults")
         # Create the config file with default values
         os.makedirs('.pmarkdownc', exist_ok=True)
         with open(config_path, 'w') as config_file:
@@ -219,6 +222,10 @@ def generate_markdown(project_path: str,
                       max_size: int = MAX_FILE_SIZE,
                       forbidden_dirs : List[str] = []) -> None:
     project_path = os.path.abspath(project_path)
+    logging.info(f"Starting markdown generation for project: {project_path}")
+    logging.info(f"Include pattern: {include_pattern}, Exclude pattern: {exclude_pattern}")
+    logging.info(f"Supported extensions: {supported_extensions}")
+    
     gitignore_spec = load_gitignore(project_path)
 
     # Clean up any existing output files
@@ -241,11 +248,16 @@ def generate_markdown(project_path: str,
             # Filter out directories that should be ignored
             dirs[:] = [d for d in dirs
                        if not d.startswith('.')
-                       and not d not in forbidden_dirs
+                       and d not in forbidden_dirs
                        and not is_ignored(os.path.join(root, d), project_path, gitignore_spec)]
+            
+            logging.debug(f"Processing directory: {root}")
+            logging.debug(f"Filtered directories: {dirs}")
+            logging.debug(f"Files to process: {files}")
 
             # Skip this directory if it should be ignored
             if is_ignored(root, project_path, gitignore_spec):
+                logging.debug(f"Skipping ignored directory: {root}")
                 continue
 
             level: int = root.replace(project_path, '').count(os.sep)
@@ -263,15 +275,19 @@ def generate_markdown(project_path: str,
             for file in sorted(files):  # Sort files for consistent ordering
                 file_path = os.path.join(root, file)
                 if is_ignored(file_path, project_path, gitignore_spec):
+                    logging.debug(f"Skipping ignored file: {file_path}")
                     continue
 
                 _, ext = os.path.splitext(file)
                 if ext in supported_extensions:
                     if include_pattern and not re.search(include_pattern, file):
+                        logging.debug(f"File {file} doesn't match include pattern: {include_pattern}")
                         continue
                     if exclude_pattern and re.search(exclude_pattern, file):
+                        logging.debug(f"File {file} matches exclude pattern: {exclude_pattern}")
                         continue
 
+                    logging.debug(f"Processing file: {file_path}")
                     try:
                         with open(file_path, 'r') as code_file:
                             code_content: str = code_file.read()
