@@ -164,6 +164,8 @@ class MarkdownWriter:
 
         # If we created multiple chunks, create an index
         if len(self.chunks) > 1:
+            # Create a new index file with a different name to avoid overwriting the first chunk
+            index_filename = f"{os.path.splitext(self.base_filename)[0]}_index{os.path.splitext(self.base_filename)[1]}"
             index_content = ["# Project Structure Index\n\n"]
             total_size = 0
 
@@ -180,10 +182,10 @@ class MarkdownWriter:
 
             index_content.append(f"\nTotal size: {total_size / 1024:.2f}KB")
 
-            # Write the index file
-            with open(self.base_filename, 'w', encoding='utf-8') as f:
+            # Write the index to a separate file
+            with open(index_filename, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(index_content))
-            logging.info(f"Created index file with {len(self.chunks)} chunks, total size: {total_size / 1024:.2f}KB")
+            logging.info(f"Created index file {index_filename} with {len(self.chunks)} chunks, total size: {total_size / 1024:.2f}KB")
 
 
 def load_gitignore(project_path: str) -> PathSpec:
