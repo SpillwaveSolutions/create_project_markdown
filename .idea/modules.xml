@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/project-markdown-creator.iml" filepath="$PROJECT_DIR$/.idea/project-markdown-creator.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/create_project_markdown.iml" filepath="$PROJECT_DIR$/.idea/create_project_markdown.iml" />
     </modules>
   </component>
 </project>
